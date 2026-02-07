@@ -297,6 +297,7 @@ ${groupsList.map(g =>
         let userRanking = []
         
         if (periodKey) {
+            // Periodo specifico: usa periodicStats
             const periodStats = global.periodicStats[periodKey].users || {}
             
             for (const [jid, messages] of Object.entries(periodStats)) {
@@ -305,9 +306,12 @@ ${groupsList.map(g =>
                 }
             }
         } else {
+            // Totale: usa global.db.data.users
             const allUsers = global.db.data.users || {}
             userRanking = Object.entries(allUsers)
-                .filter(([jid, data]) => data.messages > 0 && jid.endsWith('@s.whatsapp.net'))
+                .filter(([jid, data]) => {
+                    return jid.endsWith('@s.whatsapp.net') && data.messages && data.messages > 0
+                })
         }
         
         userRanking.sort(([_, a], [__, b]) => b.messages - a.messages)
@@ -333,6 +337,8 @@ ${groupsList.map(g =>
                 } catch {
                     userName = jid.split('@')[0]
                 }
+            } else {
+                userName = jid.split('@')[0]
             }
             
             let medal = ''
