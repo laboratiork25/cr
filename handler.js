@@ -209,28 +209,6 @@ if (!global.dbSaveInterval) {
     }, 5 * 60 * 1000)
 }
 
-// ==================== LAZY IMPORT MODULES ====================
-let topModule = null
-let sfideModule = null
-
-async function getTopModule() {
-    if (!topModule) {
-        try {
-            topModule = await import('./plugins/top.js')
-        } catch (e) {}
-    }
-    return topModule
-}
-
-async function getSfideModule() {
-    if (!sfideModule) {
-        try {
-            sfideModule = await import('./plugins/sfide.js')
-        } catch (e) {}
-    }
-    return sfideModule
-}
-
 // ==================== MAIN HANDLER ====================
 export async function handler(chatUpdate) {
     this.msgqueque = this.msgqueque || []
@@ -295,14 +273,13 @@ export async function handler(chatUpdate) {
         
         const isCommand = m.text && global.prefix.test(m.text)
         
-        // ==================== CONTEGGIO MESSAGGI ULTRA-FAST ====================
+        // ==================== CONTEGGIO MESSAGGI ====================
         if (m.isGroup && chat.chatrank && !isCommand) {
             const skipTypes = ['reactionMessage', 'pollUpdateMessage', 'stickerMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'ptvMessage']
             
             if (!skipTypes.includes(m.mtype) && (m.mtype === 'conversation' || m.mtype === 'extendedTextMessage')) {
                 const floodCheck = checkAntiFlood(normalizedSender, m.chat)
                 
-                // Warning silenzioso (non blocca)
                 if (floodCheck.warning && floodCheck.isNew) {
                     this.sendMessage(m.chat, {
                         text: `⚠️ @${normalizedSender.split('@')[0]}, rallenta! Warning: 1/5`,
@@ -310,7 +287,6 @@ export async function handler(chatUpdate) {
                     }).catch(() => {})
                 }
                 
-                // Block con notifica
                 if (floodCheck.blocked) {
                     if (floodCheck.isNew) {
                         const emoji = floodCheck.severe ? '🚫' : floodCheck.warnings >= 4 ? '⛔' : '⚠️'
@@ -332,27 +308,29 @@ export async function handler(chatUpdate) {
                 
                 chat.totalMessages = (chat.totalMessages || 0) + 1
 
-               // Update stats SINCRONO
-try {
-    const top = await getTopModule()
-    if (top?.updatePeriodicStats) {
-        top.updatePeriodicStats(m.chat, normalizedSender)
-    }
-} catch (e) {}
+                // ==================== UPDATE STATS DIRETTO ====================
+                try {
+                    const { updatePeriodicStats } = await import('./plugins/index/top.js')
+                    if (updatePeriodicStats) {
+                        updatePeriodicStats(m.chat, normalizedSender)
+                        console.log(chalk.green(`✅ Stats aggiornate: ${normalizedSender.split('@')[0]}`))
+                    }
+                } catch (e) {
+                    console.error('Errore update stats:', e)
+                }
 
-try {
-    const sfide = await getSfideModule()
-    if (sfide?.updateChallengeProgress) {
-        sfide.updateChallengeProgress(m.chat, normalizedSender)
-    }
-} catch (e) {}
-
+                try {
+                    const { updateChallengeProgress } = await import('./plugins/index/sfide.js')
+                    if (updateChallengeProgress) {
+                        updateChallengeProgress(m.chat, normalizedSender)
+                    }
+                } catch (e) {}
             }
         }
         
         if (!isCommand) return
         
-        // ==================== COMMAND HANDLING OTTIMIZZATO ====================
+        // ==================== COMMAND HANDLING ====================
         m.exp = 0
         m.isCommand = false
         
@@ -374,8 +352,6 @@ try {
             
             const __filename = join(___dirname, name)
             
-            // Skip plugin.all per velocità
-            
             const str2Regex = str => str.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&')
             let _prefix = plugin.customPrefix || global.prefix || '.'
             let match = (_prefix instanceof RegExp ? [[_prefix.exec(m.text), _prefix]] :
@@ -385,8 +361,6 @@ try {
                 }) :
                 typeof _prefix === 'string' ? [[new RegExp(str2Regex(_prefix)).exec(m.text), _prefix]] :
                 [[[], new RegExp]]).find(p => p[1])
-            
-            // Skip plugin.before per velocità
             
             if (typeof plugin !== 'function') continue
             if (!match || !match[0]) continue
@@ -462,15 +436,12 @@ try {
                     await this.reply(m.chat, text, m)
                 }
                 
-                // Skip plugin.after per velocità
-                
                 break
             }
         }
     } catch (e) {
         console.error(`Errore handler:`, e)
     } finally {
-        // Print async (non-blocking)
         if (!global.opts['noprint'] && m) {
             setImmediate(async () => {
                 try {
