@@ -167,41 +167,45 @@ export function flushMessageBuffer() {
             if (!global.db.data.chats[chatId]) continue
             
             for (const [userId, count] of users.entries()) {
+                let normalizedUserId = userId
+                if (userId.endsWith('@lid')) {
+                    normalizedUserId = `${userId.split('@')[0]}@s.whatsapp.net`
+                }
+                
                 // Update DB
                 if (!global.db.data.chats[chatId].users) {
                     global.db.data.chats[chatId].users = {}
                 }
-                if (!global.db.data.chats[chatId].users[userId]) {
-                    global.db.data.chats[chatId].users[userId] = { 
+                if (!global.db.data.chats[chatId].users[normalizedUserId]) {
+                    global.db.data.chats[chatId].users[normalizedUserId] = { 
                         messages: 0, 
                         lastMessage: 0,
                         firstMessage: Date.now()
                     }
                 }
                 
-                global.db.data.chats[chatId].users[userId].messages += count
-                global.db.data.chats[chatId].users[userId].lastMessage = Date.now()
+                global.db.data.chats[chatId].users[normalizedUserId].messages += count
+                global.db.data.chats[chatId].users[normalizedUserId].lastMessage = Date.now()
                 
-                if (!global.db.data.users[userId]) {
-                    global.db.data.users[userId] = {
+                if (!global.db.data.users[normalizedUserId]) {
+                    global.db.data.users[normalizedUserId] = {
                         messages: 0,
                         name: '?',
                         banned: false,
                         firstTime: Date.now()
                     }
                 }
-                global.db.data.users[userId].messages += count
+                global.db.data.users[normalizedUserId].messages += count
                 
                 // ==================== UPDATE PERIODIC STATS ====================
-                if (global.periodicStats && userId.endsWith('@s.whatsapp.net')) {
+                if (global.periodicStats && normalizedUserId.endsWith('@s.whatsapp.net')) {
                     const periods = ['daily', 'weekly', 'monthly', 'yearly']
                     for (const period of periods) {
-                        if (!global.periodicStats[period].users[userId]) {
-                            global.periodicStats[period].users[userId] = 0
+                        if (!global.periodicStats[period].users[normalizedUserId]) {
+                            global.periodicStats[period].users[normalizedUserId] = 0
                         }
-                        global.periodicStats[period].users[userId] += count
+                        global.periodicStats[period].users[normalizedUserId] += count
                     }
-                    console.log(chalk.blue(`💾 Flush periodic stats: ${userId.split('@')[0]} +${count}`))
                 }
             }
         }
@@ -258,19 +262,40 @@ export async function handler(chatUpdate) {
         const normalizedSender = this.decodeJid(m.sender)
         if (!normalizedSender) return
         
+        // ==================== FIX @lid → @s.whatsapp.net ====================
+        let userJid = normalizedSender
+        let displayName = m.pushName || 'Sconosciuto'
+        
+        if (userJid.endsWith('@lid')) {
+            const phoneNumber = userJid.split('@')[0]
+            userJid = `${phoneNumber}@s.whatsapp.net`
+        }
+        
+        // Salva/aggiorna nome in cache
+        if (displayName !== 'Sconosciuto') {
+            global.nameCache.set(userJid, displayName)
+        } else if (global.nameCache.has(userJid)) {
+            displayName = global.nameCache.get(userJid)
+        }
+        
         // Init rapido DB
         global.db.data.users = global.db.data.users || {}
         global.db.data.chats = global.db.data.chats || {}
         global.db.data.stats = global.db.data.stats || {}
         global.db.data.settings = global.db.data.settings || {}
         
-        let user = global.db.data.users[normalizedSender]
+        let user = global.db.data.users[userJid]
         if (!user) {
-            user = global.db.data.users[normalizedSender] = {
+            user = global.db.data.users[userJid] = {
                 messages: 0,
-                name: m.pushName || '?',
+                name: displayName,
                 banned: false,
                 firstTime: Date.now()
+            }
+        } else {
+            // Aggiorna nome se cambiato
+            if (displayName !== 'Sconosciuto' && user.name !== displayName) {
+                user.name = displayName
             }
         }
         
@@ -291,12 +316,12 @@ export async function handler(chatUpdate) {
             const skipTypes = ['reactionMessage', 'pollUpdateMessage', 'stickerMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'ptvMessage']
             
             if (!skipTypes.includes(m.mtype) && (m.mtype === 'conversation' || m.mtype === 'extendedTextMessage')) {
-                const floodCheck = checkAntiFlood(normalizedSender, m.chat)
+                const floodCheck = checkAntiFlood(userJid, m.chat)
                 
                 if (floodCheck.warning && floodCheck.isNew) {
                     this.sendMessage(m.chat, {
-                        text: `⚠️ @${normalizedSender.split('@')[0]}, rallenta! Warning: 1/5`,
-                        mentions: [normalizedSender]
+                        text: `⚠️ ${displayName}, rallenta! Warning: 1/5`,
+                        mentions: [userJid]
                     }).catch(() => {})
                 }
                 
@@ -304,10 +329,10 @@ export async function handler(chatUpdate) {
                     if (floodCheck.isNew) {
                         const emoji = floodCheck.severe ? '🚫' : floodCheck.warnings >= 4 ? '⛔' : '⚠️'
                         const msg = floodCheck.severe 
-                            ? `${emoji} @${normalizedSender.split('@')[0]} BLOCCATO per spam grave!\n⏱️ ${floodCheck.timeout} minuti`
-                            : `${emoji} @${normalizedSender.split('@')[0]} rallenta!\n⏱️ Timeout: ${floodCheck.timeout}m | ⚠️ ${floodCheck.warnings}/6`
+                            ? `${emoji} ${displayName} BLOCCATO per spam grave!\n⏱️ ${floodCheck.timeout} minuti`
+                            : `${emoji} ${displayName} rallenta!\n⏱️ Timeout: ${floodCheck.timeout}m | ⚠️ ${floodCheck.warnings}/6`
                         
-                        this.sendMessage(m.chat, { text: msg, mentions: [normalizedSender] }).catch(() => {})
+                        this.sendMessage(m.chat, { text: msg, mentions: [userJid] }).catch(() => {})
                     }
                     return
                 }
@@ -317,22 +342,22 @@ export async function handler(chatUpdate) {
                     global.messageBuffer.set(m.chat, new Map())
                 }
                 const chatBuffer = global.messageBuffer.get(m.chat)
-                chatBuffer.set(normalizedSender, (chatBuffer.get(normalizedSender) || 0) + 1)
+                chatBuffer.set(userJid, (chatBuffer.get(userJid) || 0) + 1)
                 
                 chat.totalMessages = (chat.totalMessages || 0) + 1
 
-                // ==================== UPDATE STATS IMMEDIATO ====================
+                // ==================== UPDATE STATS ====================
                 try {
-                    const { updatePeriodicStats } = await import('./plugins/top.js')
+                    const { updatePeriodicStats } = await import('./plugins/index/top.js')
                     if (updatePeriodicStats) {
-                        updatePeriodicStats(m.chat, normalizedSender)
+                        updatePeriodicStats(m.chat, userJid)
                     }
                 } catch (e) {}
 
                 try {
-                    const { updateChallengeProgress } = await import('./plugins/sfide.js')
+                    const { updateChallengeProgress } = await import('./plugins/index/sfide.js')
                     if (updateChallengeProgress) {
-                        updateChallengeProgress(m.chat, normalizedSender)
+                        updateChallengeProgress(m.chat, userJid)
                     }
                 } catch (e) {}
             }
@@ -351,7 +376,7 @@ export async function handler(chatUpdate) {
             settings = global.db.data.settings[this.user.jid] = { autoread: false }
         }
         
-        let isOwner = global.owner?.some(([num]) => num + '@s.whatsapp.net' === normalizedSender) || false
+        let isOwner = global.owner?.some(([num]) => num + '@s.whatsapp.net' === userJid) || false
         
         // ==================== PLUGIN SYSTEM ====================
         const ___dirname = join(path.dirname(fileURLToPath(import.meta.url)), './plugins/index')
