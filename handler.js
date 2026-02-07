@@ -292,8 +292,7 @@ export async function handler(chatUpdate) {
         }
         
         const isCommand = m.text && global.prefix.test(m.text)
-        
-        // ==================== CONTEGGIO MESSAGGI ====================
+       // ==================== CONTEGGIO MESSAGGI ====================
 if (m.isGroup && chat.chatrank && !isCommand) {
     const skipTypes = ['reactionMessage', 'pollUpdateMessage', 'stickerMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'ptvMessage']
     
@@ -305,7 +304,7 @@ if (m.isGroup && chat.chatrank && !isCommand) {
             // Manda notifica SOLO la prima volta
             if (floodCheck.isNew) {
                 this.sendMessage(m.chat, {
-                    text: `⚠️ @${userJid.split('@')[0]} escluso dal conteggio per spam!\n⏱️ Timeout: 5 minuti`,
+                    text: `⚠️ *${displayName}* escluso dal conteggio per spam!\n⏱️ Timeout: 5 minuti`,
                     mentions: [userJid]
                 }).catch(() => {})
             }
@@ -336,6 +335,8 @@ if (m.isGroup && chat.chatrank && !isCommand) {
             }
         } catch (e) {}
     }
+
+
 }
 
         
