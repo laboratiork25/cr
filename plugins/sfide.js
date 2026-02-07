@@ -165,18 +165,25 @@ if (!global.challengeResetScheduled) {
 export function updateChallengeProgress(chatId, userId) {
     if (!global.dailyChallenges.groups.current || !global.dailyChallenges.users.current) return
     
+    // ==================== FIX @lid → @s.whatsapp.net ====================
+    let normalizedUserId = userId
+    if (userId.endsWith('@lid')) {
+        normalizedUserId = `${userId.split('@')[0]}@s.whatsapp.net`
+    }
+    
     // Update group progress
     if (!global.dailyChallenges.groups.progress[chatId]) {
         global.dailyChallenges.groups.progress[chatId] = 0
     }
     global.dailyChallenges.groups.progress[chatId]++
     
-    // Update user progress
-    if (!global.dailyChallenges.users.progress[userId]) {
-        global.dailyChallenges.users.progress[userId] = 0
+    // Update user progress (usa normalizedUserId)
+    if (!global.dailyChallenges.users.progress[normalizedUserId]) {
+        global.dailyChallenges.users.progress[normalizedUserId] = 0
     }
-    global.dailyChallenges.users.progress[userId]++
+    global.dailyChallenges.users.progress[normalizedUserId]++
 }
+
 
 // ==================== COMANDO .sfide ====================
 export default async function handler(m, { conn, args }) {
@@ -321,18 +328,28 @@ ${challenge.description}
         for (const [userId, progress] of Object.entries(global.dailyChallenges.users.progress)) {
             if (progress === 0) continue
             
-            // Fetch nome utente
+            // ==================== FIX @lid → NOME ====================
             let userName = 'Sconosciuto'
-            if (global.nameCache && global.nameCache.has(userId)) {
+            
+            // 1. Prova dal DB
+            if (global.db?.data?.users?.[userId]?.name && global.db.data.users[userId].name !== '?') {
+                userName = global.db.data.users[userId].name
+            }
+            // 2. Prova dalla cache
+            else if (global.nameCache && global.nameCache.has(userId)) {
                 userName = global.nameCache.get(userId)
-            } else if (conn.getName) {
+            }
+            // 3. Prova getName
+            else if (conn.getName) {
                 try {
                     userName = await conn.getName(userId) || userName
                     if (global.nameCache) global.nameCache.set(userId, userName)
                 } catch {
                     userName = userId.split('@')[0]
                 }
-            } else {
+            }
+            // 4. Fallback
+            else {
                 userName = userId.split('@')[0]
             }
             
@@ -400,13 +417,12 @@ ${challenge.description}
                 // Status
                 const status = user.completed ? '✅' : '⏳'
                 
-                testo += `\n『 ${medal} 』@${user.userId.split('@')[0]}\n`
+                // ==================== SOLO NOME (NO @) ====================
+                testo += `\n『 ${medal} 』${user.name}\n`
                 testo += `     ${status} [${bar}] ${user.percentage}%\n`
                 testo += `     💬 ${user.progress.toLocaleString()} / ${challenge.target.toLocaleString()}\n`
             }
         }
-        
-        const mentions = top10.map(u => u.userId)
         
         testo += `\n╰────────────╯\n\n> Reset automatico ogni giorno a mezzanotte 🌙`
         
@@ -414,8 +430,7 @@ ${challenge.description}
         
         await delay(300)
         await conn.sendMessage(m.chat, {
-            text: testo,
-            mentions: mentions
+            text: testo
         }, { quoted: m })
     }
 }
