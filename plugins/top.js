@@ -5,12 +5,29 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 // ==================== INIZIALIZZAZIONE STATS PERIODICHE ====================
 if (!global.periodicStats) {
-    global.periodicStats = {
-        daily: { lastReset: Date.now(), groups: {}, users: {} },
-        weekly: { lastReset: Date.now(), groups: {}, users: {} },
-        monthly: { lastReset: Date.now(), groups: {}, users: {} },
-        yearly: { lastReset: Date.now(), groups: {}, users: {} }
+    // Prova a caricare dal DB
+    if (global.db?.data?.periodicStats) {
+        global.periodicStats = global.db.data.periodicStats
+        console.log(chalk.green('✅ Periodic stats caricate dal DB'))
+    } else {
+        global.periodicStats = {
+            daily: { lastReset: Date.now(), groups: {}, users: {} },
+            weekly: { lastReset: Date.now(), groups: {}, users: {} },
+            monthly: { lastReset: Date.now(), groups: {}, users: {} },
+            yearly: { lastReset: Date.now(), groups: {}, users: {} }
+        }
+        console.log(chalk.yellow('⚠️ Periodic stats inizializzate da zero'))
     }
+}
+
+// Salva periodicStats nel DB ogni 5 minuti
+if (!global.periodicStatsSaveInterval) {
+    global.periodicStatsSaveInterval = setInterval(() => {
+        if (global.db?.data && global.periodicStats) {
+            global.db.data.periodicStats = global.periodicStats
+            console.log(chalk.blue('💾 Periodic stats salvate nel DB'))
+        }
+    }, 5 * 60 * 1000) // 5 minuti
 }
 
 // ==================== FUNZIONI RESET PERIODICO ====================
@@ -57,6 +74,9 @@ function formatTimeRemaining(ms) {
 function needsDailyReset() {
     const now = Date.now()
     const lastReset = global.periodicStats.daily.lastReset
+    
+    if (now - lastReset < 23 * 60 * 60 * 1000) return false
+    
     const lastResetDate = new Date(lastReset).setHours(0, 0, 0, 0)
     const todayDate = new Date(now).setHours(0, 0, 0, 0)
     return todayDate > lastResetDate
@@ -65,6 +85,8 @@ function needsDailyReset() {
 function needsWeeklyReset() {
     const now = new Date()
     const lastReset = new Date(global.periodicStats.weekly.lastReset)
+    
+    if (now.getTime() - lastReset.getTime() < 6 * 24 * 60 * 60 * 1000) return false
     
     const currentMonday = new Date(now)
     currentMonday.setDate(now.getDate() - now.getDay() + 1)
@@ -95,10 +117,14 @@ function resetPeriodic(period) {
         groups: {},
         users: {}
     }
+    // Salva subito nel DB dopo reset
+    if (global.db?.data) {
+        global.db.data.periodicStats = global.periodicStats
+    }
     console.log(chalk.cyan(`🔄 Reset ${period} stats`))
 }
 
-// ==================== AUTO-RESET CHECKER (ogni ora) ====================
+// ==================== AUTO-RESET CHECKER ====================
 if (!global.periodicResetInterval) {
     global.periodicResetInterval = setInterval(() => {
         if (needsDailyReset()) {
@@ -119,27 +145,14 @@ if (!global.periodicResetInterval) {
         }
     }, 60 * 60 * 1000)
     
-    console.log(chalk.yellow('⏰ Scheduler reset periodici attivo (check ogni ora)'))
+    console.log(chalk.yellow('⏰ Scheduler reset periodici attivo'))
 }
-
-// Check e reset automatico all'avvio
-if (needsDailyReset()) resetPeriodic('daily')
-if (needsWeeklyReset()) resetPeriodic('weekly')
-if (needsMonthlyReset()) resetPeriodic('monthly')
-if (needsYearlyReset()) resetPeriodic('yearly')
 
 // ==================== AGGIORNA STATS PERIODICHE ====================
 export function updatePeriodicStats(chatId, userId) {
-    // Check reset necessari
-    if (needsDailyReset()) resetPeriodic('daily')
-    if (needsWeeklyReset()) resetPeriodic('weekly')
-    if (needsMonthlyReset()) resetPeriodic('monthly')
-    if (needsYearlyReset()) resetPeriodic('yearly')
-    
     const periods = ['daily', 'weekly', 'monthly', 'yearly']
     
     for (const period of periods) {
-        // Groups (solo JID validi)
         if (chatId.endsWith('@g.us')) {
             if (!global.periodicStats[period].groups[chatId]) {
                 global.periodicStats[period].groups[chatId] = 0
@@ -147,7 +160,6 @@ export function updatePeriodicStats(chatId, userId) {
             global.periodicStats[period].groups[chatId]++
         }
         
-        // Users (solo JID validi)
         if (userId.endsWith('@s.whatsapp.net')) {
             if (!global.periodicStats[period].users[userId]) {
                 global.periodicStats[period].users[userId] = 0
@@ -171,7 +183,6 @@ export default async function handler(m, { conn, args, isOwner }) {
     
     const isGruppi = ['gruppi', 'groups'].includes(tipo)
     
-    // Determina periodo (default = giornaliero)
     let periodKey = 'daily'
     let periodName = 'GIORNALIERO'
     let periodIcon = '📅'
@@ -202,7 +213,6 @@ export default async function handler(m, { conn, args, isOwner }) {
     }
     
     if (isGruppi) {
-        // ==================== TOP GRUPPI ====================
         let groupRanking = []
         
         if (periodKey) {
@@ -239,15 +249,13 @@ export default async function handler(m, { conn, args, isOwner }) {
             return
         }
         
-        // ==================== FETCH NOMI GRUPPI ====================
         const groupsList = []
         for (let i = 0; i < groupRanking.length; i++) {
             const { jid, totalMessages } = groupRanking[i]
             
             let groupName = 'Gruppo Sconosciuto'
-            if (global.groupCache && global.groupCache.has(jid)) {
-                const metadata = global.groupCache.get(jid)
-                groupName = metadata?.subject || jid
+            if (global.groupCache?.has(jid)) {
+                groupName = global.groupCache.get(jid)?.subject || jid
             } else {
                 try {
                     const metadata = await conn.groupMetadata(jid)
@@ -258,46 +266,27 @@ export default async function handler(m, { conn, args, isOwner }) {
                 }
             }
             
-            let medal = ''
-            if (i === 0) medal = '🥇'
-            else if (i === 1) medal = '🥈'
-            else if (i === 2) medal = '🥉'
-            else medal = `${i + 1}.`
+            let medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`
             
-            groupsList.push({
-                medal,
-                name: groupName,
-                messages: totalMessages
-            })
+            groupsList.push({ medal, name: groupName, messages: totalMessages })
         }
         
-        // ==================== MESSAGGIO GRUPPI ====================
         let testo = ` ⋆｡˚『 ${periodIcon} ╭ \`TOP GRUPPI ${periodName}\` ╯ 』˚｡⋆
 
-${groupsList.map(g => 
-`『 ${g.medal} 』\`${g.name}\`
-     💬 ${g.messages.toLocaleString()} messaggi`
-).join('\n\n')}`
+${groupsList.map(g => `『 ${g.medal} 』\`${g.name}\`\n     💬 ${g.messages.toLocaleString()} messaggi`).join('\n\n')}`
 
-        // Footer con reset time
         if (nextReset) {
             const timeRemaining = formatTimeRemaining(nextReset - Date.now())
             testo += `\n\n╭────────────╮\n『 ⏰ 』Reset tra: *${timeRemaining}*\n╰────────────╯`
         }
         
-        testo = testo.trim()
-        
         await delay(300)
-        await conn.sendMessage(m.chat, {
-            text: testo
-        }, { quoted: m })
+        await conn.sendMessage(m.chat, { text: testo.trim() }, { quoted: m })
         
     } else {
-        // ==================== TOP UTENTI ====================
         let userRanking = []
         
         if (periodKey) {
-            // Periodo specifico: usa periodicStats
             const periodStats = global.periodicStats[periodKey].users || {}
             
             for (const [jid, messages] of Object.entries(periodStats)) {
@@ -306,12 +295,9 @@ ${groupsList.map(g =>
                 }
             }
         } else {
-            // Totale: usa global.db.data.users
             const allUsers = global.db.data.users || {}
             userRanking = Object.entries(allUsers)
-                .filter(([jid, data]) => {
-                    return jid.endsWith('@s.whatsapp.net') && data.messages && data.messages > 0
-                })
+                .filter(([jid, data]) => jid.endsWith('@s.whatsapp.net') && data.messages > 0)
         }
         
         userRanking.sort(([_, a], [__, b]) => b.messages - a.messages)
@@ -322,62 +308,67 @@ ${groupsList.map(g =>
             return
         }
         
-        // ==================== FETCH NOMI UTENTI ====================
-        const usersList = []
-        for (let i = 0; i < userRanking.length; i++) {
-            const [jid, data] = userRanking[i]
-            
-            let userName = data.name || 'Sconosciuto'
-            if (global.nameCache && global.nameCache.has(jid)) {
-                userName = global.nameCache.get(jid)
-            } else if (conn.getName) {
-                try {
-                    userName = await conn.getName(jid) || userName
-                    if (global.nameCache) global.nameCache.set(jid, userName)
-                } catch {
-                    userName = jid.split('@')[0]
-                }
-            } else {
-                userName = jid.split('@')[0]
+       // ==================== FETCH NOMI UTENTI ====================
+const usersList = []
+for (let i = 0; i < userRanking.length; i++) {
+    const [jid, data] = userRanking[i]
+    
+    // Priority: 1. Nome dal DB, 2. Cache, 3. getName, 4. JID
+    let userName = 'Utente'
+    
+    // 1. Prova dal DB
+    if (global.db?.data?.users?.[jid]?.name && global.db.data.users[jid].name !== '?') {
+        userName = global.db.data.users[jid].name
+    }
+    // 2. Prova dalla cache
+    else if (global.nameCache?.has(jid)) {
+        userName = global.nameCache.get(jid)
+    }
+    // 3. Prova getName
+    else if (conn.getName) {
+        try {
+            const fetchedName = await conn.getName(jid)
+            if (fetchedName) {
+                userName = fetchedName
+                if (global.nameCache) global.nameCache.set(jid, userName)
             }
+        } catch (e) {}
+    }
+    
+    // 4. Fallback: usa prima parte del numero (senza @lid)
+    if (userName === 'Utente' || userName === '?') {
+        const phoneNumber = jid.split('@')[0]
+        // Se è un numero valido (solo cifre)
+        if (/^\d+$/.test(phoneNumber)) {
+            userName = phoneNumber
+        } else {
+            userName = 'Utente Sconosciuto'
+        }
+    }
+
             
-            let medal = ''
-            if (i === 0) medal = '🥇'
-            else if (i === 1) medal = '🥈'
-            else if (i === 2) medal = '🥉'
-            else medal = `${i + 1}.`
+            let medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`
             
-            usersList.push({
-                medal,
-                jid,
-                name: userName,
-                messages: data.messages
-            })
+            usersList.push({ medal, jid, name: userName, messages: data.messages })
         }
         
-        // ==================== MESSAGGIO UTENTI ====================
-        let testo = ` ⋆｡˚『 ${periodIcon} ╭ \`TOP UTENTI ${periodName}\` ╯ 』˚｡⋆
+      let testo = ` ⋆｡˚『 ${periodIcon} ╭ \`TOP UTENTI ${periodName}\` ╯ 』˚｡⋆
 
 ${usersList.map(u => 
-`『 ${u.medal} 』@${u.jid.split('@')[0]}
+`『 ${u.medal} 』${u.name}
      💬 ${u.messages.toLocaleString()} messaggi`
 ).join('\n\n')}`
 
-        // Footer con reset time
+
         if (nextReset) {
             const timeRemaining = formatTimeRemaining(nextReset - Date.now())
             testo += `\n\n╭────────────╮\n『 ⏰ 』Reset tra: *${timeRemaining}*\n╰────────────╯`
         }
         
-        testo = testo.trim()
-        
         const mentions = usersList.map(u => u.jid)
         
         await delay(300)
-        await conn.sendMessage(m.chat, {
-            text: testo,
-            mentions: mentions
-        }, { quoted: m })
+        await conn.sendMessage(m.chat, { text: testo.trim(), mentions }, { quoted: m })
     }
 }
 
