@@ -17,17 +17,14 @@ if (!global.nameCache) {
     global.nameCache = new NodeCache({ stdTTL: 14400, useClones: false })
 }
 
-// Cache per stats aggregati (riduce accessi DB)
 if (!global.statsCache) {
-    global.statsCache = new NodeCache({ stdTTL: 300, useClones: false }) // 5 min
+    global.statsCache = new NodeCache({ stdTTL: 300, useClones: false })
 }
 
-// Buffer per batch write (riduce I/O)
 if (!global.messageBuffer) {
     global.messageBuffer = new Map()
 }
 
-// Anti-flood system
 if (!global.antiFlood) {
     global.antiFlood = new Map()
 }
@@ -87,7 +84,7 @@ export async function participantsUpdate({ id, participants, action }) {
     } catch (e) {}
 }
 
-// ==================== ANTI-FLOOD SYSTEM MIGLIORATO ====================
+// ==================== ANTI-FLOOD SYSTEM ====================
 function checkAntiFlood(userId, chatId) {
     const now = Date.now()
     const key = `${userId}_${chatId}`
@@ -102,84 +99,49 @@ function checkAntiFlood(userId, chatId) {
     
     const userData = global.antiFlood.get(key)
     
-    // Se è in timeout
     if (now < userData.blockedUntil) {
-        return {
-            blocked: true,
-            remaining: Math.ceil((userData.blockedUntil - now) / 1000)
-        }
+        return { blocked: true, remaining: Math.ceil((userData.blockedUntil - now) / 1000) }
     }
     
-    // Pulisci messaggi vecchi (ultimi 5 secondi)
     userData.messages = userData.messages.filter(t => now - t < 5000)
     userData.messages.push(now)
     
-    // Sistema multi-livello più rigoroso
     const msgCount = userData.messages.length
     
-    // Livello 1: 5+ messaggi in 5 secondi = Warning
     if (msgCount >= 5 && msgCount < 8) {
         userData.warnings++
         
         if (userData.warnings === 1) {
-            // Primo avviso (no block)
-            return {
-                blocked: false,
-                warning: true,
-                isNew: true
-            }
+            return { blocked: false, warning: true, isNew: true }
         } else if (userData.warnings === 2) {
-            // Secondo avviso = 2 minuti
             userData.blockedUntil = now + (2 * 60 * 1000)
             userData.messages = []
-            return {
-                blocked: true,
-                timeout: 2,
-                warnings: userData.warnings,
-                isNew: true
-            }
+            return { blocked: true, timeout: 2, warnings: userData.warnings, isNew: true }
         }
     }
     
-    // Livello 2: 8+ messaggi in 5 secondi = Block immediato
     if (msgCount >= 8 && msgCount < 12) {
         userData.warnings += 2
-        userData.blockedUntil = now + (5 * 60 * 1000) // 5 minuti
+        userData.blockedUntil = now + (5 * 60 * 1000)
         userData.messages = []
-        
-        return {
-            blocked: true,
-            timeout: 5,
-            warnings: userData.warnings,
-            isNew: true
-        }
+        return { blocked: true, timeout: 5, warnings: userData.warnings, isNew: true }
     }
     
-    // Livello 3: 12+ messaggi in 5 secondi = Block lungo
     if (msgCount >= 12) {
         userData.warnings += 3
         const timeoutMinutes = userData.warnings >= 6 ? 30 : 15
         userData.blockedUntil = now + (timeoutMinutes * 60 * 1000)
         userData.messages = []
-        
-        return {
-            blocked: true,
-            timeout: timeoutMinutes,
-            warnings: userData.warnings,
-            isNew: true,
-            severe: true
-        }
+        return { blocked: true, timeout: timeoutMinutes, warnings: userData.warnings, isNew: true, severe: true }
     }
     
     return { blocked: false }
 }
 
-// Pulizia periodica anti-flood (ogni 5 minuti)
 if (!global.antiFloodCleanup) {
     global.antiFloodCleanup = setInterval(() => {
         const now = Date.now()
         for (const [key, data] of global.antiFlood.entries()) {
-            // Rimuovi entry vecchie (>1 ora) e resetta warning dopo 30 min
             if (data.blockedUntil < now - (30 * 60 * 1000)) {
                 data.warnings = Math.max(0, data.warnings - 1)
             }
@@ -247,6 +209,28 @@ if (!global.dbSaveInterval) {
     }, 5 * 60 * 1000)
 }
 
+// ==================== LAZY IMPORT MODULES ====================
+let topModule = null
+let sfideModule = null
+
+async function getTopModule() {
+    if (!topModule) {
+        try {
+            topModule = await import('./plugins/top.js')
+        } catch (e) {}
+    }
+    return topModule
+}
+
+async function getSfideModule() {
+    if (!sfideModule) {
+        try {
+            sfideModule = await import('./plugins/sfide.js')
+        } catch (e) {}
+    }
+    return sfideModule
+}
+
 // ==================== MAIN HANDLER ====================
 export async function handler(chatUpdate) {
     this.msgqueque = this.msgqueque || []
@@ -280,13 +264,14 @@ export async function handler(chatUpdate) {
     try {
         if (!global.db.data) await global.loadDatabase()
         
-        if (!global.db.data.users) global.db.data.users = {}
-        if (!global.db.data.chats) global.db.data.chats = {}
-        if (!global.db.data.stats) global.db.data.stats = {}
-        if (!global.db.data.settings) global.db.data.settings = {}
-        
         const normalizedSender = this.decodeJid(m.sender)
         if (!normalizedSender) return
+        
+        // Init rapido DB
+        global.db.data.users = global.db.data.users || {}
+        global.db.data.chats = global.db.data.chats || {}
+        global.db.data.stats = global.db.data.stats || {}
+        global.db.data.settings = global.db.data.settings || {}
         
         let user = global.db.data.users[normalizedSender]
         if (!user) {
@@ -310,115 +295,83 @@ export async function handler(chatUpdate) {
         
         const isCommand = m.text && global.prefix.test(m.text)
         
-        // ==================== CONTEGGIO MESSAGGI ====================
+        // ==================== CONTEGGIO MESSAGGI ULTRA-FAST ====================
         if (m.isGroup && chat.chatrank && !isCommand) {
-            const skipTypes = [
-                'reactionMessage',
-                'pollUpdateMessage',
-                'stickerMessage',
-                'imageMessage',
-                'videoMessage',
-                'audioMessage',
-                'documentMessage',
-                'ptvMessage'
-            ]
+            const skipTypes = ['reactionMessage', 'pollUpdateMessage', 'stickerMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'ptvMessage']
             
-            if (!skipTypes.includes(m.mtype)) {
-                const validTypes = ['conversation', 'extendedTextMessage']
-                if (validTypes.includes(m.mtype)) {
-                    // ==================== ANTI-FLOOD CHECK ====================
-                    const floodCheck = checkAntiFlood(normalizedSender, m.chat)
-                    
-                    if (floodCheck.warning) {
-                        // Primo warning (solo avviso)
-                        await this.sendMessage(m.chat, {
-                            text: `⚠️ *AVVISO SPAM*\n\n@${normalizedSender.split('@')[0]}, rallenta!\n\n📊 Warning: 1/5\n🧘 Continua così e verrai bloccato`,
-                            mentions: [normalizedSender]
-                        }).catch(() => {})
-                    }
-                    
-                    if (floodCheck.blocked) {
-                        if (floodCheck.isNew) {
-                            const warningEmoji = floodCheck.severe ? '🚫' : 
-                                                floodCheck.warnings >= 4 ? '⛔' : '⚠️'
-                            
-                            const message = floodCheck.severe 
-                                ? `${warningEmoji} *SPAM GRAVE RILEVATO*\n\n@${normalizedSender.split('@')[0]} SEI STATO BLOCCATO!\n\n⏱️ Timeout: *${floodCheck.timeout} minuti*\n⚠️ Warning: ${floodCheck.warnings}/6\n\n⛔ Continua e verrai bannato permanentemente!`
-                                : `${warningEmoji} *ANTI-FLOOD*\n\n@${normalizedSender.split('@')[0]} stai spammando!\n\n⏱️ Timeout: *${floodCheck.timeout} minuti*\n⚠️ Warning: ${floodCheck.warnings}/6\n\n🧘 Rallenta o verrai bannato`
-                            
-                            await this.sendMessage(m.chat, {
-                                text: message,
-                                mentions: [normalizedSender]
-                            }).catch(() => {})
-                        }
-                        return
-                    }
-                    
-                    // Conteggio messaggi validi
-                    if (!global.messageBuffer.has(m.chat)) {
-                        global.messageBuffer.set(m.chat, new Map())
-                    }
-                    const chatBuffer = global.messageBuffer.get(m.chat)
-                    const currentCount = chatBuffer.get(normalizedSender) || 0
-                    chatBuffer.set(normalizedSender, currentCount + 1)
-                    
-                    chat.totalMessages = (chat.totalMessages || 0) + 1
-
-                    // Aggiorna stats
-                    try {
-                        const topModule = await import('./plugins/top.js')
-                        if (topModule?.updatePeriodicStats) {
-                            topModule.updatePeriodicStats(m.chat, normalizedSender)
-                        }
-                    } catch (e) {}
-
-                    try {
-                        const sfideModule = await import('./plugins/sfide.js')
-                        if (sfideModule?.updateChallengeProgress) {
-                            sfideModule.updateChallengeProgress(m.chat, normalizedSender)
-                        }
-                    } catch (e) {}
+            if (!skipTypes.includes(m.mtype) && (m.mtype === 'conversation' || m.mtype === 'extendedTextMessage')) {
+                const floodCheck = checkAntiFlood(normalizedSender, m.chat)
+                
+                // Warning silenzioso (non blocca)
+                if (floodCheck.warning && floodCheck.isNew) {
+                    this.sendMessage(m.chat, {
+                        text: `⚠️ @${normalizedSender.split('@')[0]}, rallenta! Warning: 1/5`,
+                        mentions: [normalizedSender]
+                    }).catch(() => {})
                 }
+                
+                // Block con notifica
+                if (floodCheck.blocked) {
+                    if (floodCheck.isNew) {
+                        const emoji = floodCheck.severe ? '🚫' : floodCheck.warnings >= 4 ? '⛔' : '⚠️'
+                        const msg = floodCheck.severe 
+                            ? `${emoji} @${normalizedSender.split('@')[0]} BLOCCATO per spam grave!\n⏱️ ${floodCheck.timeout} minuti`
+                            : `${emoji} @${normalizedSender.split('@')[0]} rallenta!\n⏱️ Timeout: ${floodCheck.timeout}m | ⚠️ ${floodCheck.warnings}/6`
+                        
+                        this.sendMessage(m.chat, { text: msg, mentions: [normalizedSender] }).catch(() => {})
+                    }
+                    return
+                }
+                
+                // Buffer messaggi
+                if (!global.messageBuffer.has(m.chat)) {
+                    global.messageBuffer.set(m.chat, new Map())
+                }
+                const chatBuffer = global.messageBuffer.get(m.chat)
+                chatBuffer.set(normalizedSender, (chatBuffer.get(normalizedSender) || 0) + 1)
+                
+                chat.totalMessages = (chat.totalMessages || 0) + 1
+
+                // Update stats async (non-blocking)
+                setImmediate(async () => {
+                    const top = await getTopModule()
+                    if (top?.updatePeriodicStats) {
+                        top.updatePeriodicStats(m.chat, normalizedSender)
+                    }
+                    
+                    const sfide = await getSfideModule()
+                    if (sfide?.updateChallengeProgress) {
+                        sfide.updateChallengeProgress(m.chat, normalizedSender)
+                    }
+                })
             }
         }
         
         if (!isCommand) return
         
-        // ==================== COMMAND HANDLING ====================
+        // ==================== COMMAND HANDLING OTTIMIZZATO ====================
         m.exp = 0
         m.isCommand = false
         
+        if (m.mtype === 'pollUpdateMessage' || m.mtype === 'reactionMessage') return
+        
         let settings = global.db.data.settings[this.user.jid]
         if (!settings) {
-            settings = global.db.data.settings[this.user.jid] = {
-                autoread: false
-            }
+            settings = global.db.data.settings[this.user.jid] = { autoread: false }
         }
         
-        if (m.mtype === 'pollUpdateMessage') return
-        if (m.mtype === 'reactionMessage') return
-        
-        const normalizedBot = this.decodeJid(this.user.jid)
         let isOwner = global.owner?.some(([num]) => num + '@s.whatsapp.net' === normalizedSender) || false
         
         // ==================== PLUGIN SYSTEM ====================
         const ___dirname = join(path.dirname(fileURLToPath(import.meta.url)), './plugins/index')
+        
         for (let name in global.plugins) {
             let plugin = global.plugins[name]
             if (!plugin) continue
             
             const __filename = join(___dirname, name)
-            if (typeof plugin.all === 'function') {
-                try {
-                    await plugin.all.call(this, m, {
-                        chatUpdate,
-                        __dirname: ___dirname,
-                        __filename
-                    })
-                } catch (e) {
-                    console.error('Errore plugin.all:', e)
-                }
-            }
+            
+            // Skip plugin.all per velocità
             
             const str2Regex = str => str.replace(/[|\\{}()[\]^$+*?.]/g, '\\$&')
             let _prefix = plugin.customPrefix || global.prefix || '.'
@@ -430,16 +383,7 @@ export async function handler(chatUpdate) {
                 typeof _prefix === 'string' ? [[new RegExp(str2Regex(_prefix)).exec(m.text), _prefix]] :
                 [[[], new RegExp]]).find(p => p[1])
             
-            if (typeof plugin.before === 'function') {
-                if (await plugin.before.call(this, m, {
-                    match,
-                    conn: this,
-                    isOwner,
-                    chatUpdate,
-                    __dirname: ___dirname,
-                    __filename
-                })) continue
-            }
+            // Skip plugin.before per velocità
             
             if (typeof plugin !== 'function') continue
             if (!match || !match[0]) continue
@@ -467,9 +411,7 @@ export async function handler(chatUpdate) {
                 m.plugin = name
                 if (chat.isBanned && !isOwner) return
                 if (user.banned && !isOwner) {
-                    await this.sendMessage(m.chat, {
-                        text: `🚫 Sei bannato`
-                    }, { quoted: m })
+                    this.sendMessage(m.chat, { text: `🚫 Sei bannato` }, { quoted: m })
                     return
                 }
                 
@@ -515,26 +457,24 @@ export async function handler(chatUpdate) {
                     }
                     let text = format(e)
                     await this.reply(m.chat, text, m)
-                } finally {
-                    if (typeof plugin.after === 'function') {
-                        try {
-                            await plugin.after.call(this, m, extra)
-                        } catch (e) {
-                            console.error('Errore plugin.after:', e)
-                        }
-                    }
                 }
+                
+                // Skip plugin.after per velocità
+                
                 break
             }
         }
     } catch (e) {
         console.error(`Errore handler:`, e)
     } finally {
-        try {
-            if (!global.opts['noprint'] && m) {
-                await (await import(`./lib/print.js`)).default(m, this)
-            }
-        } catch (e) {}
+        // Print async (non-blocking)
+        if (!global.opts['noprint'] && m) {
+            setImmediate(async () => {
+                try {
+                    await (await import(`./lib/print.js`)).default(m, this)
+                } catch (e) {}
+            })
+        }
     }
 }
 
