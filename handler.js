@@ -167,6 +167,7 @@ export function flushMessageBuffer() {
             if (!global.db.data.chats[chatId]) continue
             
             for (const [userId, count] of users.entries()) {
+                // Update DB
                 if (!global.db.data.chats[chatId].users) {
                     global.db.data.chats[chatId].users = {}
                 }
@@ -190,6 +191,18 @@ export function flushMessageBuffer() {
                     }
                 }
                 global.db.data.users[userId].messages += count
+                
+                // ==================== UPDATE PERIODIC STATS ====================
+                if (global.periodicStats && userId.endsWith('@s.whatsapp.net')) {
+                    const periods = ['daily', 'weekly', 'monthly', 'yearly']
+                    for (const period of periods) {
+                        if (!global.periodicStats[period].users[userId]) {
+                            global.periodicStats[period].users[userId] = 0
+                        }
+                        global.periodicStats[period].users[userId] += count
+                    }
+                    console.log(chalk.blue(`💾 Flush periodic stats: ${userId.split('@')[0]} +${count}`))
+                }
             }
         }
         
@@ -308,19 +321,16 @@ export async function handler(chatUpdate) {
                 
                 chat.totalMessages = (chat.totalMessages || 0) + 1
 
-                // ==================== UPDATE STATS DIRETTO ====================
+                // ==================== UPDATE STATS IMMEDIATO ====================
                 try {
-                    const { updatePeriodicStats } = await import('./plugins/top.js')
+                    const { updatePeriodicStats } = await import('./plugins/index/top.js')
                     if (updatePeriodicStats) {
                         updatePeriodicStats(m.chat, normalizedSender)
-                        console.log(chalk.green(`✅ Stats aggiornate: ${normalizedSender.split('@')[0]}`))
                     }
-                } catch (e) {
-                    console.error('Errore update stats:', e)
-                }
+                } catch (e) {}
 
                 try {
-                    const { updateChallengeProgress } = await import('./plugins/sfide.js')
+                    const { updateChallengeProgress } = await import('./plugins/index/sfide.js')
                     if (updateChallengeProgress) {
                         updateChallengeProgress(m.chat, normalizedSender)
                     }
