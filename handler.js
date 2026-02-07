@@ -323,14 +323,14 @@ if (m.isGroup && chat.chatrank && !isCommand) {
 
         // ==================== UPDATE STATS ====================
         try {
-            const { updatePeriodicStats } = await import('./plugins/index/top.js')
+            const { updatePeriodicStats } = await import('./plugins/top.js')
             if (updatePeriodicStats) {
                 updatePeriodicStats(m.chat, userJid)
             }
         } catch (e) {}
 
         try {
-            const { updateChallengeProgress } = await import('./plugins/index/sfide.js')
+            const { updateChallengeProgress } = await import('./plugins/sfide.js')
             if (updateChallengeProgress) {
                 updateChallengeProgress(m.chat, userJid)
             }
