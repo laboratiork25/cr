@@ -84,7 +84,7 @@ export async function participantsUpdate({ id, participants, action }) {
     } catch (e) {}
 }
 
-// ==================== ANTI-FLOOD SYSTEM ====================
+// ==================== ANTI-FLOOD SYSTEM SEMPLIFICATO ====================
 function checkAntiFlood(userId, chatId) {
     const now = Date.now()
     const key = `${userId}_${chatId}`
@@ -93,46 +93,29 @@ function checkAntiFlood(userId, chatId) {
         global.antiFlood.set(key, {
             messages: [],
             blockedUntil: 0,
-            warnings: 0
+            notified: false  // Flag per evitare spam di notifiche
         })
     }
     
     const userData = global.antiFlood.get(key)
     
+    // Se è bloccato, non contare messaggi
     if (now < userData.blockedUntil) {
-        return { blocked: true, remaining: Math.ceil((userData.blockedUntil - now) / 1000) }
+        return { blocked: true, silent: true }  // Silent = non mandare altri messaggi
     }
     
+    // Pulisci messaggi vecchi (oltre 5 secondi)
     userData.messages = userData.messages.filter(t => now - t < 5000)
     userData.messages.push(now)
     
     const msgCount = userData.messages.length
     
-    if (msgCount >= 5 && msgCount < 8) {
-        userData.warnings++
-        
-        if (userData.warnings === 1) {
-            return { blocked: false, warning: true, isNew: true }
-        } else if (userData.warnings === 2) {
-            userData.blockedUntil = now + (2 * 60 * 1000)
-            userData.messages = []
-            return { blocked: true, timeout: 2, warnings: userData.warnings, isNew: true }
-        }
-    }
-    
-    if (msgCount >= 8 && msgCount < 12) {
-        userData.warnings += 2
-        userData.blockedUntil = now + (5 * 60 * 1000)
+    // Se supera 6 messaggi in 5 secondi → blocca per 5 minuti
+    if (msgCount >= 6) {
+        userData.blockedUntil = now + (5 * 60 * 1000)  // 5 minuti
         userData.messages = []
-        return { blocked: true, timeout: 5, warnings: userData.warnings, isNew: true }
-    }
-    
-    if (msgCount >= 12) {
-        userData.warnings += 3
-        const timeoutMinutes = userData.warnings >= 6 ? 30 : 15
-        userData.blockedUntil = now + (timeoutMinutes * 60 * 1000)
-        userData.messages = []
-        return { blocked: true, timeout: timeoutMinutes, warnings: userData.warnings, isNew: true, severe: true }
+        userData.notified = false  // Reset flag per nuova notifica
+        return { blocked: true, timeout: 5, isNew: true }
     }
     
     return { blocked: false }
@@ -142,15 +125,14 @@ if (!global.antiFloodCleanup) {
     global.antiFloodCleanup = setInterval(() => {
         const now = Date.now()
         for (const [key, data] of global.antiFlood.entries()) {
-            if (data.blockedUntil < now - (30 * 60 * 1000)) {
-                data.warnings = Math.max(0, data.warnings - 1)
-            }
-            if (data.blockedUntil < now && data.messages.length === 0 && data.warnings === 0) {
+            // Rimuovi entry vecchie (oltre 10 minuti di inattività)
+            if (data.blockedUntil < now && data.messages.length === 0) {
                 global.antiFlood.delete(key)
             }
         }
     }, 5 * 60 * 1000)
 }
+
 
 // ==================== BATCH WRITE SYSTEM ====================
 if (!global.messageFlushInterval) {
@@ -312,56 +294,50 @@ export async function handler(chatUpdate) {
         const isCommand = m.text && global.prefix.test(m.text)
         
         // ==================== CONTEGGIO MESSAGGI ====================
-        if (m.isGroup && chat.chatrank && !isCommand) {
-            const skipTypes = ['reactionMessage', 'pollUpdateMessage', 'stickerMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'ptvMessage']
-            
-            if (!skipTypes.includes(m.mtype) && (m.mtype === 'conversation' || m.mtype === 'extendedTextMessage')) {
-                const floodCheck = checkAntiFlood(userJid, m.chat)
-                
-                if (floodCheck.warning && floodCheck.isNew) {
-                    this.sendMessage(m.chat, {
-                        text: `⚠️ ${displayName}, rallenta! Warning: 1/5`,
-                        mentions: [userJid]
-                    }).catch(() => {})
-                }
-                
-                if (floodCheck.blocked) {
-                    if (floodCheck.isNew) {
-                        const emoji = floodCheck.severe ? '🚫' : floodCheck.warnings >= 4 ? '⛔' : '⚠️'
-                        const msg = floodCheck.severe 
-                            ? `${emoji} ${displayName} BLOCCATO per spam grave!\n⏱️ ${floodCheck.timeout} minuti`
-                            : `${emoji} ${displayName} rallenta!\n⏱️ Timeout: ${floodCheck.timeout}m | ⚠️ ${floodCheck.warnings}/6`
-                        
-                        this.sendMessage(m.chat, { text: msg, mentions: [userJid] }).catch(() => {})
-                    }
-                    return
-                }
-                
-                // Buffer messaggi
-                if (!global.messageBuffer.has(m.chat)) {
-                    global.messageBuffer.set(m.chat, new Map())
-                }
-                const chatBuffer = global.messageBuffer.get(m.chat)
-                chatBuffer.set(userJid, (chatBuffer.get(userJid) || 0) + 1)
-                
-                chat.totalMessages = (chat.totalMessages || 0) + 1
-
-                // ==================== UPDATE STATS ====================
-                try {
-                    const { updatePeriodicStats } = await import('./plugins/index/top.js')
-                    if (updatePeriodicStats) {
-                        updatePeriodicStats(m.chat, userJid)
-                    }
-                } catch (e) {}
-
-                try {
-                    const { updateChallengeProgress } = await import('./plugins/index/sfide.js')
-                    if (updateChallengeProgress) {
-                        updateChallengeProgress(m.chat, userJid)
-                    }
-                } catch (e) {}
+if (m.isGroup && chat.chatrank && !isCommand) {
+    const skipTypes = ['reactionMessage', 'pollUpdateMessage', 'stickerMessage', 'imageMessage', 'videoMessage', 'audioMessage', 'documentMessage', 'ptvMessage']
+    
+    if (!skipTypes.includes(m.mtype) && (m.mtype === 'conversation' || m.mtype === 'extendedTextMessage')) {
+        const floodCheck = checkAntiFlood(userJid, m.chat)
+        
+        // Se bloccato, non contare il messaggio
+        if (floodCheck.blocked) {
+            // Manda notifica SOLO la prima volta
+            if (floodCheck.isNew) {
+                this.sendMessage(m.chat, {
+                    text: `⚠️ @${userJid.split('@')[0]} escluso dal conteggio per spam!\n⏱️ Timeout: 5 minuti`,
+                    mentions: [userJid]
+                }).catch(() => {})
             }
+            return  // Non contare questo messaggio
         }
+        
+        // Buffer messaggi
+        if (!global.messageBuffer.has(m.chat)) {
+            global.messageBuffer.set(m.chat, new Map())
+        }
+        const chatBuffer = global.messageBuffer.get(m.chat)
+        chatBuffer.set(userJid, (chatBuffer.get(userJid) || 0) + 1)
+        
+        chat.totalMessages = (chat.totalMessages || 0) + 1
+
+        // ==================== UPDATE STATS ====================
+        try {
+            const { updatePeriodicStats } = await import('./plugins/index/top.js')
+            if (updatePeriodicStats) {
+                updatePeriodicStats(m.chat, userJid)
+            }
+        } catch (e) {}
+
+        try {
+            const { updateChallengeProgress } = await import('./plugins/index/sfide.js')
+            if (updateChallengeProgress) {
+                updateChallengeProgress(m.chat, userJid)
+            }
+        } catch (e) {}
+    }
+}
+
         
         if (!isCommand) return
         
