@@ -332,18 +332,21 @@ export async function handler(chatUpdate) {
                 
                 chat.totalMessages = (chat.totalMessages || 0) + 1
 
-                // Update stats async (non-blocking)
-                setImmediate(async () => {
-                    const top = await getTopModule()
-                    if (top?.updatePeriodicStats) {
-                        top.updatePeriodicStats(m.chat, normalizedSender)
-                    }
-                    
-                    const sfide = await getSfideModule()
-                    if (sfide?.updateChallengeProgress) {
-                        sfide.updateChallengeProgress(m.chat, normalizedSender)
-                    }
-                })
+               // Update stats SINCRONO
+try {
+    const top = await getTopModule()
+    if (top?.updatePeriodicStats) {
+        top.updatePeriodicStats(m.chat, normalizedSender)
+    }
+} catch (e) {}
+
+try {
+    const sfide = await getSfideModule()
+    if (sfide?.updateChallengeProgress) {
+        sfide.updateChallengeProgress(m.chat, normalizedSender)
+    }
+} catch (e) {}
+
             }
         }
         
