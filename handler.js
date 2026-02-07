@@ -310,7 +310,7 @@ export async function handler(chatUpdate) {
 
                 // ==================== UPDATE STATS DIRETTO ====================
                 try {
-                    const { updatePeriodicStats } = await import('./plugins/index/top.js')
+                    const { updatePeriodicStats } = await import('./plugins/top.js')
                     if (updatePeriodicStats) {
                         updatePeriodicStats(m.chat, normalizedSender)
                         console.log(chalk.green(`✅ Stats aggiornate: ${normalizedSender.split('@')[0]}`))
@@ -320,7 +320,7 @@ export async function handler(chatUpdate) {
                 }
 
                 try {
-                    const { updateChallengeProgress } = await import('./plugins/index/sfide.js')
+                    const { updateChallengeProgress } = await import('./plugins/sfide.js')
                     if (updateChallengeProgress) {
                         updateChallengeProgress(m.chat, normalizedSender)
                     }
