@@ -96,6 +96,49 @@ const USER_CHALLENGES = [
     }
 ]
 
+// ==================== FILTRO NOMI GRUPPI ====================
+function containsLink(text) {
+    const linkPatterns = [
+        /https?:\/\//i,
+        /chat\.whatsapp\.com/i,
+        /wa\.me/i,
+        /t\.me/i,
+        /discord\.gg/i,
+        /bit\.ly/i,
+        /tinyurl\.com/i
+    ]
+    return linkPatterns.some(pattern => pattern.test(text))
+}
+
+function isInappropriate(text) {
+    const badWords = [
+        'porno', 'porn', 'xxx', 'sex', 'nude', 'nudo', 'nuda',
+        'onlyfans', 'escort', 'casino', 'scommesse', 'betting'
+    ]
+    const lowerText = text.toLowerCase()
+    return badWords.some(word => lowerText.includes(word))
+}
+
+function shouldExcludeGroup(groupName, jid) {
+    // 1. Check lista esclusi manuale
+    const excludedGroups = global.db.data.excludedGroups || []
+    if (excludedGroups.includes(jid)) {
+        return true
+    }
+    
+    // 2. Check link nel nome
+    if (containsLink(groupName)) {
+        return true
+    }
+    
+    // 3. Check parole inappropriate
+    if (isInappropriate(groupName)) {
+        return true
+    }
+    
+    return false
+}
+
 // ==================== FUNZIONI SFIDE ====================
 function getMidnight() {
     const now = new Date()
@@ -114,7 +157,6 @@ function needsReset() {
 }
 
 function resetChallenges() {
-    // Scegli sfide random
     const randomGroupChallenge = GROUP_CHALLENGES[Math.floor(Math.random() * GROUP_CHALLENGES.length)]
     const randomUserChallenge = USER_CHALLENGES[Math.floor(Math.random() * USER_CHALLENGES.length)]
     
@@ -142,7 +184,7 @@ function scheduleNextReset() {
     
     setTimeout(() => {
         resetChallenges()
-        scheduleNextReset() // Programma il prossimo reset
+        scheduleNextReset()
     }, timeUntilMidnight)
     
     const hours = Math.floor(timeUntilMidnight / (1000 * 60 * 60))
@@ -150,12 +192,10 @@ function scheduleNextReset() {
     console.log(chalk.yellow(`⏰ Prossimo reset sfide: ${hours}h ${minutes}m`))
 }
 
-// Inizializza sfide se non esistono o serve reset
 if (needsReset() || !global.dailyChallenges.groups.current || !global.dailyChallenges.users.current) {
     resetChallenges()
 }
 
-// Programma reset automatico
 if (!global.challengeResetScheduled) {
     scheduleNextReset()
     global.challengeResetScheduled = true
@@ -165,30 +205,25 @@ if (!global.challengeResetScheduled) {
 export function updateChallengeProgress(chatId, userId) {
     if (!global.dailyChallenges.groups.current || !global.dailyChallenges.users.current) return
     
-    // ==================== FIX @lid → @s.whatsapp.net ====================
     let normalizedUserId = userId
     if (userId.endsWith('@lid')) {
         normalizedUserId = `${userId.split('@')[0]}@s.whatsapp.net`
     }
     
-    // Update group progress
     if (!global.dailyChallenges.groups.progress[chatId]) {
         global.dailyChallenges.groups.progress[chatId] = 0
     }
     global.dailyChallenges.groups.progress[chatId]++
     
-    // Update user progress (usa normalizedUserId)
     if (!global.dailyChallenges.users.progress[normalizedUserId]) {
         global.dailyChallenges.users.progress[normalizedUserId] = 0
     }
     global.dailyChallenges.users.progress[normalizedUserId]++
 }
 
-
 // ==================== COMANDO .sfide ====================
 export default async function handler(m, { conn, args }) {
     
-    // Check reset necessario
     if (needsReset()) {
         resetChallenges()
     }
@@ -202,11 +237,10 @@ export default async function handler(m, { conn, args }) {
     
     const isGruppi = ['gruppi', 'groups'].includes(tipo)
     
-    // Flush buffer per dati aggiornati
     flushMessageBuffer()
     
     if (isGruppi) {
-        // ==================== SFIDA GRUPPI ====================
+        // ==================== SFIDA GRUPPI CON FILTRI ====================
         const challenge = global.dailyChallenges.groups.current
         
         if (!challenge) {
@@ -216,6 +250,7 @@ export default async function handler(m, { conn, args }) {
         
         // ==================== CALCOLA PROGRESS GRUPPI ====================
         const groupProgress = []
+        let excluded = 0
         
         for (const [chatId, progress] of Object.entries(global.dailyChallenges.groups.progress)) {
             if (progress === 0) continue
@@ -235,6 +270,12 @@ export default async function handler(m, { conn, args }) {
                 }
             }
             
+            // ==================== APPLICA FILTRI ====================
+            if (shouldExcludeGroup(groupName, chatId)) {
+                excluded++
+                continue
+            }
+            
             const percentage = Math.min((progress / challenge.target * 100), 100).toFixed(1)
             const completed = progress >= challenge.target
             
@@ -247,10 +288,7 @@ export default async function handler(m, { conn, args }) {
             })
         }
         
-        // Ordina per progress
         groupProgress.sort((a, b) => b.progress - a.progress)
-        
-        // Prendi top 5
         const top5 = groupProgress.slice(0, 5)
         
         // ==================== CALCOLA TEMPO RIMANENTE ====================
@@ -282,20 +320,17 @@ ${challenge.description}
             for (let i = 0; i < top5.length; i++) {
                 const group = top5[i]
                 
-                // Medal
                 let medal = ''
                 if (i === 0) medal = '🥇'
                 else if (i === 1) medal = '🥈'
                 else if (i === 2) medal = '🥉'
                 else medal = `${i + 1}.`
                 
-                // Progress bar
                 const barLength = 10
                 const filled = Math.floor((group.percentage / 100) * barLength)
                 const empty = barLength - filled
                 const bar = '█'.repeat(filled) + '░'.repeat(empty)
                 
-                // Status
                 const status = group.completed ? '✅' : '⏳'
                 
                 testo += `\n『 ${medal} 』\`${group.name}\`\n`
@@ -306,12 +341,14 @@ ${challenge.description}
         
         testo += `\n╰───────────╯\n\n> Reset automatico ogni giorno a mezzanotte 🌙`
         
+        if (excluded > 0) {
+            testo += `\n\n_${excluded} gruppo${excluded > 1 ? 'i' : ''} esclus${excluded > 1 ? 'i' : 'o'} (link/contenuto inappropriato)_`
+        }
+        
         testo = testo.trim()
         
         await delay(300)
-        await conn.sendMessage(m.chat, {
-            text: testo
-        }, { quoted: m })
+        await conn.sendMessage(m.chat, { text: testo }, { quoted: m })
         
     } else {
         // ==================== SFIDA UTENTI ====================
@@ -328,28 +365,20 @@ ${challenge.description}
         for (const [userId, progress] of Object.entries(global.dailyChallenges.users.progress)) {
             if (progress === 0) continue
             
-            // ==================== FIX @lid → NOME ====================
             let userName = 'Sconosciuto'
             
-            // 1. Prova dal DB
             if (global.db?.data?.users?.[userId]?.name && global.db.data.users[userId].name !== '?') {
                 userName = global.db.data.users[userId].name
-            }
-            // 2. Prova dalla cache
-            else if (global.nameCache && global.nameCache.has(userId)) {
+            } else if (global.nameCache && global.nameCache.has(userId)) {
                 userName = global.nameCache.get(userId)
-            }
-            // 3. Prova getName
-            else if (conn.getName) {
+            } else if (conn.getName) {
                 try {
                     userName = await conn.getName(userId) || userName
                     if (global.nameCache) global.nameCache.set(userId, userName)
                 } catch {
                     userName = userId.split('@')[0]
                 }
-            }
-            // 4. Fallback
-            else {
+            } else {
                 userName = userId.split('@')[0]
             }
             
@@ -365,10 +394,7 @@ ${challenge.description}
             })
         }
         
-        // Ordina per progress
         userProgress.sort((a, b) => b.progress - a.progress)
-        
-        // Prendi top 10
         const top10 = userProgress.slice(0, 10)
         
         // ==================== CALCOLA TEMPO RIMANENTE ====================
@@ -400,7 +426,6 @@ ${challenge.description}
             for (let i = 0; i < top10.length; i++) {
                 const user = top10[i]
                 
-                // Medal
                 let medal = ''
                 if (i === 0) medal = '🥇'
                 else if (i === 1) medal = '🥈'
@@ -408,16 +433,13 @@ ${challenge.description}
                 else if (i < 10) medal = '🏆'
                 else medal = `${i + 1}.`
                 
-                // Progress bar
                 const barLength = 10
                 const filled = Math.floor((user.percentage / 100) * barLength)
                 const empty = barLength - filled
                 const bar = '█'.repeat(filled) + '░'.repeat(empty)
                 
-                // Status
                 const status = user.completed ? '✅' : '⏳'
                 
-                // ==================== SOLO NOME (NO @) ====================
                 testo += `\n『 ${medal} 』${user.name}\n`
                 testo += `     ${status} [${bar}] ${user.percentage}%\n`
                 testo += `     💬 ${user.progress.toLocaleString()} / ${challenge.target.toLocaleString()}\n`
@@ -429,9 +451,7 @@ ${challenge.description}
         testo = testo.trim()
         
         await delay(300)
-        await conn.sendMessage(m.chat, {
-            text: testo
-        }, { quoted: m })
+        await conn.sendMessage(m.chat, { text: testo }, { quoted: m })
     }
 }
 
@@ -440,3 +460,4 @@ handler.tags = ['rank']
 handler.command = /^(sfide|sfida|challenge)$/i
 
 export { handler }
+
