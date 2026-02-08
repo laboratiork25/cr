@@ -5,7 +5,6 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 // ==================== INIZIALIZZAZIONE STATS PERIODICHE ====================
 if (!global.periodicStats) {
-    // Prova a caricare dal DB
     if (global.db?.data?.periodicStats) {
         global.periodicStats = global.db.data.periodicStats
         console.log(chalk.green('✅ Periodic stats caricate dal DB'))
@@ -27,7 +26,12 @@ if (!global.periodicStatsSaveInterval) {
             global.db.data.periodicStats = global.periodicStats
             console.log(chalk.blue('💾 Periodic stats salvate nel DB'))
         }
-    }, 5 * 60 * 1000) // 5 minuti
+    }, 5 * 60 * 1000)
+}
+
+// ==================== CACHE GRUPPI ESCLUSI ====================
+if (!global.excludedGroupsCache) {
+    global.excludedGroupsCache = new Map() // { jid: { name, reason, timestamp } }
 }
 
 // ==================== FUNZIONI RESET PERIODICO ====================
@@ -122,6 +126,11 @@ function resetPeriodic(period) {
         groups: {},
         users: {}
     }
+    // Pulisci cache esclusioni al reset
+    if (period === 'daily') {
+        global.excludedGroupsCache.clear()
+        console.log(chalk.cyan('🔄 Cache esclusioni pulita'))
+    }
     if (global.db?.data) {
         global.db.data.periodicStats = global.periodicStats
         global.db.write().catch(console.error)
@@ -168,27 +177,6 @@ if (!global.periodicResetInterval) {
 
 checkAndResetIfNeeded()
 
-// ==================== AGGIORNA STATS PERIODICHE ====================
-export function updatePeriodicStats(chatId, userId) {
-    const periods = ['daily', 'weekly', 'monthly', 'yearly']
-    
-    for (const period of periods) {
-        if (chatId.endsWith('@g.us')) {
-            if (!global.periodicStats[period].groups[chatId]) {
-                global.periodicStats[period].groups[chatId] = 0
-            }
-            global.periodicStats[period].groups[chatId]++
-        }
-        
-        if (userId.endsWith('@s.whatsapp.net')) {
-            if (!global.periodicStats[period].users[userId]) {
-                global.periodicStats[period].users[userId] = 0
-            }
-            global.periodicStats[period].users[userId]++
-        }
-    }
-}
-
 // ==================== FILTRO NOMI GRUPPI ====================
 function containsLink(text) {
     const linkPatterns = [
@@ -204,7 +192,6 @@ function containsLink(text) {
 }
 
 function isInappropriate(text) {
-    // Parole inappropriate comuni (aggiungi altre se serve)
     const badWords = [
         'porno', 'porn', 'xxx', 'sex', 'nude', 'nudo', 'nuda',
         'onlyfans', 'escort', 'casino', 'scommesse', 'betting'
@@ -213,26 +200,99 @@ function isInappropriate(text) {
     return badWords.some(word => lowerText.includes(word))
 }
 
-function shouldExcludeGroup(groupName, jid) {
-    // 1. Check lista esclusi manuale
+// ==================== FUNZIONE PER ESCLUDERE GRUPPI ====================
+async function shouldExcludeGroup(jid, conn) {
+    // 1. Check cache esclusioni (valida per 1 ora)
+    if (global.excludedGroupsCache.has(jid)) {
+        const cached = global.excludedGroupsCache.get(jid)
+        if (Date.now() - cached.timestamp < 60 * 60 * 1000) {
+            return cached
+        }
+    }
+    
+    // 2. Check lista esclusi manuale
     const excludedGroups = global.db.data.excludedGroups || []
     if (excludedGroups.includes(jid)) {
-        return true
+        const result = { excluded: true, reason: 'manuale' }
+        global.excludedGroupsCache.set(jid, { ...result, timestamp: Date.now() })
+        return result
     }
     
-    // 2. Check link nel nome
+    // 3. Fetch nome gruppo
+    let groupName = null
+    if (global.groupCache?.has(jid)) {
+        groupName = global.groupCache.get(jid)?.subject
+    }
+    
+    if (!groupName) {
+        try {
+            const metadata = await conn.groupMetadata(jid)
+            groupName = metadata?.subject
+            if (metadata && global.groupCache) {
+                global.groupCache.set(jid, metadata)
+            }
+        } catch (e) {
+            const result = { excluded: true, reason: 'errore_fetch' }
+            global.excludedGroupsCache.set(jid, { ...result, timestamp: Date.now() })
+            return result
+        }
+    }
+    
+    if (!groupName) {
+        const result = { excluded: true, reason: 'nome_mancante' }
+        global.excludedGroupsCache.set(jid, { ...result, timestamp: Date.now() })
+        return result
+    }
+    
+    // 4. Check link nel nome
     if (containsLink(groupName)) {
         console.log(chalk.yellow(`🔗 Gruppo con link escluso: ${groupName}`))
-        return true
+        const result = { excluded: true, reason: 'link', name: groupName }
+        global.excludedGroupsCache.set(jid, { ...result, timestamp: Date.now() })
+        return result
     }
     
-    // 3. Check parole inappropriate
+    // 5. Check parole inappropriate
     if (isInappropriate(groupName)) {
         console.log(chalk.yellow(`🚫 Gruppo inappropriato escluso: ${groupName}`))
-        return true
+        const result = { excluded: true, reason: 'inappropriato', name: groupName }
+        global.excludedGroupsCache.set(jid, { ...result, timestamp: Date.now() })
+        return result
     }
     
-    return false
+    // 6. Gruppo OK
+    const result = { excluded: false, name: groupName }
+    global.excludedGroupsCache.set(jid, { ...result, timestamp: Date.now() })
+    return result
+}
+
+// ==================== AGGIORNA STATS PERIODICHE (CON FILTRO) ====================
+export async function updatePeriodicStats(chatId, userId, conn) {
+    const periods = ['daily', 'weekly', 'monthly', 'yearly']
+    
+    for (const period of periods) {
+        // ==================== FILTRA GRUPPI CON LINK ====================
+        if (chatId.endsWith('@g.us')) {
+            // Check se il gruppo è escluso PRIMA di contare
+            const checkResult = await shouldExcludeGroup(chatId, conn)
+            if (checkResult.excluded) {
+                // NON contare questo messaggio
+                continue
+            }
+            
+            if (!global.periodicStats[period].groups[chatId]) {
+                global.periodicStats[period].groups[chatId] = 0
+            }
+            global.periodicStats[period].groups[chatId]++
+        }
+        
+        if (userId.endsWith('@s.whatsapp.net')) {
+            if (!global.periodicStats[period].users[userId]) {
+                global.periodicStats[period].users[userId] = 0
+            }
+            global.periodicStats[period].users[userId]++
+        }
+    }
 }
 
 // ==================== COMANDO .top ====================
@@ -280,7 +340,7 @@ export default async function handler(m, { conn, args, isOwner }) {
     }
     
     if (isGruppi) {
-        // ==================== TOP GRUPPI CON FILTRI ====================
+        // ==================== TOP GRUPPI ====================
         let groupRanking = []
         
         if (periodKey) {
@@ -311,35 +371,26 @@ export default async function handler(m, { conn, args, isOwner }) {
         
         groupRanking.sort((a, b) => b.totalMessages - a.totalMessages)
         
-        // ==================== FETCH NOMI E FILTRA ====================
+        // ==================== FILTRA GRUPPI ====================
         const groupsList = []
         let excluded = 0
         
-        for (let i = 0; i < groupRanking.length && groupsList.length < 10; i++) {
-            const { jid, totalMessages } = groupRanking[i]
+        for (const { jid, totalMessages } of groupRanking) {
+            if (groupsList.length >= 10) break
             
-            let groupName = 'Gruppo Sconosciuto'
-            if (global.groupCache?.has(jid)) {
-                groupName = global.groupCache.get(jid)?.subject || jid
-            } else {
-                try {
-                    const metadata = await conn.groupMetadata(jid)
-                    groupName = metadata?.subject || jid
-                    if (global.groupCache) global.groupCache.set(jid, metadata)
-                } catch {
-                    groupName = jid.split('@')[0]
-                }
-            }
+            const checkResult = await shouldExcludeGroup(jid, conn)
             
-            // ==================== APPLICA FILTRI ====================
-            if (shouldExcludeGroup(groupName, jid)) {
+            if (checkResult.excluded) {
                 excluded++
                 continue
             }
             
-            let medal = groupsList.length === 0 ? '🥇' : groupsList.length === 1 ? '🥈' : groupsList.length === 2 ? '🥉' : `${groupsList.length + 1}.`
+            let medal = groupsList.length === 0 ? '🥇' : 
+                        groupsList.length === 1 ? '🥈' : 
+                        groupsList.length === 2 ? '🥉' : 
+                        `${groupsList.length + 1}.`
             
-            groupsList.push({ medal, name: groupName, messages: totalMessages })
+            groupsList.push({ medal, name: checkResult.name, messages: totalMessages })
         }
         
         if (groupsList.length === 0) {
@@ -357,7 +408,7 @@ ${groupsList.map(g => `『 ${g.medal} 』\`${g.name}\`\n     💬 ${g.messages.t
         }
         
         if (excluded > 0) {
-            testo += `\n\n_${excluded} gruppo${excluded > 1 ? 'i' : ''} esclus${excluded > 1 ? 'i' : 'o'} (link/contenuto inappropriato)_`
+            testo += `\n\n_${excluded} gruppo${excluded > 1 ? 'i' : ''} esclus${excluded > 1 ? 'i' : 'o'}_`
         }
         
         await delay(300)
