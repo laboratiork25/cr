@@ -77,7 +77,6 @@ function needsDailyReset() {
     const now = new Date()
     const lastReset = new Date(global.periodicStats.daily.lastReset)
     
-    // Controlla se sono giorni diversi
     return now.getDate() !== lastReset.getDate() || 
            now.getMonth() !== lastReset.getMonth() || 
            now.getFullYear() !== lastReset.getFullYear()
@@ -87,14 +86,12 @@ function needsWeeklyReset() {
     const now = new Date()
     const lastReset = new Date(global.periodicStats.weekly.lastReset)
     
-    // Calcola il lunedì di questa settimana
     const currentMonday = new Date(now)
     const day = currentMonday.getDay()
-    const diff = day === 0 ? -6 : 1 - day // Se domenica -6, altrimenti 1-day
+    const diff = day === 0 ? -6 : 1 - day
     currentMonday.setDate(currentMonday.getDate() + diff)
     currentMonday.setHours(0, 0, 0, 0)
     
-    // Calcola il lunedì della settimana del lastReset
     const lastResetMonday = new Date(lastReset)
     const lastDay = lastResetMonday.getDay()
     const lastDiff = lastDay === 0 ? -6 : 1 - lastDay
@@ -125,7 +122,6 @@ function resetPeriodic(period) {
         groups: {},
         users: {}
     }
-    // Salva subito nel DB dopo reset
     if (global.db?.data) {
         global.db.data.periodicStats = global.periodicStats
         global.db.write().catch(console.error)
@@ -161,16 +157,15 @@ function checkAndResetIfNeeded() {
     return resetOccurred
 }
 
-// ==================== AUTO-RESET CHECKER (ogni 5 minuti invece di 1 ora) ====================
+// ==================== AUTO-RESET CHECKER ====================
 if (!global.periodicResetInterval) {
     global.periodicResetInterval = setInterval(() => {
         checkAndResetIfNeeded()
-    }, 5 * 60 * 1000) // 5 minuti invece di 1 ora
+    }, 5 * 60 * 1000)
     
     console.log(chalk.yellow('⏰ Scheduler reset periodici attivo (check ogni 5 min)'))
 }
 
-// Check immediato all'avvio
 checkAndResetIfNeeded()
 
 // ==================== AGGIORNA STATS PERIODICHE ====================
@@ -194,11 +189,55 @@ export function updatePeriodicStats(chatId, userId) {
     }
 }
 
+// ==================== FILTRO NOMI GRUPPI ====================
+function containsLink(text) {
+    const linkPatterns = [
+        /https?:\/\//i,
+        /chat\.whatsapp\.com/i,
+        /wa\.me/i,
+        /t\.me/i,
+        /discord\.gg/i,
+        /bit\.ly/i,
+        /tinyurl\.com/i
+    ]
+    return linkPatterns.some(pattern => pattern.test(text))
+}
+
+function isInappropriate(text) {
+    // Parole inappropriate comuni (aggiungi altre se serve)
+    const badWords = [
+        'porno', 'porn', 'xxx', 'sex', 'nude', 'nudo', 'nuda',
+        'onlyfans', 'escort', 'casino', 'scommesse', 'betting'
+    ]
+    const lowerText = text.toLowerCase()
+    return badWords.some(word => lowerText.includes(word))
+}
+
+function shouldExcludeGroup(groupName, jid) {
+    // 1. Check lista esclusi manuale
+    const excludedGroups = global.db.data.excludedGroups || []
+    if (excludedGroups.includes(jid)) {
+        return true
+    }
+    
+    // 2. Check link nel nome
+    if (containsLink(groupName)) {
+        console.log(chalk.yellow(`🔗 Gruppo con link escluso: ${groupName}`))
+        return true
+    }
+    
+    // 3. Check parole inappropriate
+    if (isInappropriate(groupName)) {
+        console.log(chalk.yellow(`🚫 Gruppo inappropriato escluso: ${groupName}`))
+        return true
+    }
+    
+    return false
+}
+
 // ==================== COMANDO .top ====================
 export default async function handler(m, { conn, args, isOwner }) {
-    // ==================== CHECK RESET PRIMA DI MOSTRARE STATS ====================
     checkAndResetIfNeeded()
-    
     flushMessageBuffer()
     
     const tipo = args[0]?.toLowerCase()
@@ -241,6 +280,7 @@ export default async function handler(m, { conn, args, isOwner }) {
     }
     
     if (isGruppi) {
+        // ==================== TOP GRUPPI CON FILTRI ====================
         let groupRanking = []
         
         if (periodKey) {
@@ -270,15 +310,12 @@ export default async function handler(m, { conn, args, isOwner }) {
         }
         
         groupRanking.sort((a, b) => b.totalMessages - a.totalMessages)
-        groupRanking = groupRanking.slice(0, 10)
         
-        if (groupRanking.length === 0) {
-            await conn.reply(m.chat, `📊 Nessun gruppo con messaggi registrati nel periodo ${periodName.toLowerCase()}`, m)
-            return
-        }
-        
+        // ==================== FETCH NOMI E FILTRA ====================
         const groupsList = []
-        for (let i = 0; i < groupRanking.length; i++) {
+        let excluded = 0
+        
+        for (let i = 0; i < groupRanking.length && groupsList.length < 10; i++) {
             const { jid, totalMessages } = groupRanking[i]
             
             let groupName = 'Gruppo Sconosciuto'
@@ -294,9 +331,20 @@ export default async function handler(m, { conn, args, isOwner }) {
                 }
             }
             
-            let medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`
+            // ==================== APPLICA FILTRI ====================
+            if (shouldExcludeGroup(groupName, jid)) {
+                excluded++
+                continue
+            }
+            
+            let medal = groupsList.length === 0 ? '🥇' : groupsList.length === 1 ? '🥈' : groupsList.length === 2 ? '🥉' : `${groupsList.length + 1}.`
             
             groupsList.push({ medal, name: groupName, messages: totalMessages })
+        }
+        
+        if (groupsList.length === 0) {
+            await conn.reply(m.chat, `📊 Nessun gruppo con messaggi registrati nel periodo ${periodName.toLowerCase()}`, m)
+            return
         }
         
         let testo = ` ⋆｡˚『 ${periodIcon} ╭ \`TOP GRUPPI ${periodName}\` ╯ 』˚｡⋆
@@ -308,10 +356,15 @@ ${groupsList.map(g => `『 ${g.medal} 』\`${g.name}\`\n     💬 ${g.messages.t
             testo += `\n\n╭────────────╮\n『 ⏰ 』Reset tra: *${timeRemaining}*\n╰────────────╯`
         }
         
+        if (excluded > 0) {
+            testo += `\n\n_${excluded} gruppo${excluded > 1 ? 'i' : ''} esclus${excluded > 1 ? 'i' : 'o'} (link/contenuto inappropriato)_`
+        }
+        
         await delay(300)
         await conn.sendMessage(m.chat, { text: testo.trim() }, { quoted: m })
         
     } else {
+        // ==================== TOP UTENTI ====================
         let userRanking = []
         
         if (periodKey) {
