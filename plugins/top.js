@@ -40,8 +40,9 @@ function getMidnight() {
 
 function getNextMonday() {
     const now = new Date()
+    const dayOfWeek = now.getDay()
+    const daysUntilMonday = dayOfWeek === 0 ? 1 : 8 - dayOfWeek
     const nextMonday = new Date(now)
-    const daysUntilMonday = (8 - now.getDay()) % 7 || 7
     nextMonday.setDate(now.getDate() + daysUntilMonday)
     nextMonday.setHours(0, 0, 0, 0)
     return nextMonday.getTime()
@@ -71,29 +72,33 @@ function formatTimeRemaining(ms) {
     }
 }
 
+// ==================== FUNZIONI RESET SEMPLIFICATE ====================
 function needsDailyReset() {
-    const now = Date.now()
-    const lastReset = global.periodicStats.daily.lastReset
+    const now = new Date()
+    const lastReset = new Date(global.periodicStats.daily.lastReset)
     
-    if (now - lastReset < 23 * 60 * 60 * 1000) return false
-    
-    const lastResetDate = new Date(lastReset).setHours(0, 0, 0, 0)
-    const todayDate = new Date(now).setHours(0, 0, 0, 0)
-    return todayDate > lastResetDate
+    // Controlla se sono giorni diversi
+    return now.getDate() !== lastReset.getDate() || 
+           now.getMonth() !== lastReset.getMonth() || 
+           now.getFullYear() !== lastReset.getFullYear()
 }
 
 function needsWeeklyReset() {
     const now = new Date()
     const lastReset = new Date(global.periodicStats.weekly.lastReset)
     
-    if (now.getTime() - lastReset.getTime() < 6 * 24 * 60 * 60 * 1000) return false
-    
+    // Calcola il lunedì di questa settimana
     const currentMonday = new Date(now)
-    currentMonday.setDate(now.getDate() - now.getDay() + 1)
+    const day = currentMonday.getDay()
+    const diff = day === 0 ? -6 : 1 - day // Se domenica -6, altrimenti 1-day
+    currentMonday.setDate(currentMonday.getDate() + diff)
     currentMonday.setHours(0, 0, 0, 0)
     
+    // Calcola il lunedì della settimana del lastReset
     const lastResetMonday = new Date(lastReset)
-    lastResetMonday.setDate(lastReset.getDate() - lastReset.getDay() + 1)
+    const lastDay = lastResetMonday.getDay()
+    const lastDiff = lastDay === 0 ? -6 : 1 - lastDay
+    lastResetMonday.setDate(lastResetMonday.getDate() + lastDiff)
     lastResetMonday.setHours(0, 0, 0, 0)
     
     return currentMonday.getTime() > lastResetMonday.getTime()
@@ -102,12 +107,15 @@ function needsWeeklyReset() {
 function needsMonthlyReset() {
     const now = new Date()
     const lastReset = new Date(global.periodicStats.monthly.lastReset)
-    return now.getMonth() !== lastReset.getMonth() || now.getFullYear() !== lastReset.getFullYear()
+    
+    return now.getMonth() !== lastReset.getMonth() || 
+           now.getFullYear() !== lastReset.getFullYear()
 }
 
 function needsYearlyReset() {
     const now = new Date()
     const lastReset = new Date(global.periodicStats.yearly.lastReset)
+    
     return now.getFullYear() !== lastReset.getFullYear()
 }
 
@@ -120,33 +128,50 @@ function resetPeriodic(period) {
     // Salva subito nel DB dopo reset
     if (global.db?.data) {
         global.db.data.periodicStats = global.periodicStats
+        global.db.write().catch(console.error)
     }
     console.log(chalk.cyan(`🔄 Reset ${period} stats`))
 }
 
-// ==================== AUTO-RESET CHECKER ====================
+// ==================== CHECK RESET AD OGNI COMANDO ====================
+function checkAndResetIfNeeded() {
+    let resetOccurred = false
+    
+    if (needsDailyReset()) {
+        resetPeriodic('daily')
+        console.log(chalk.green('✅ Reset giornaliero completato'))
+        resetOccurred = true
+    }
+    if (needsWeeklyReset()) {
+        resetPeriodic('weekly')
+        console.log(chalk.green('✅ Reset settimanale completato'))
+        resetOccurred = true
+    }
+    if (needsMonthlyReset()) {
+        resetPeriodic('monthly')
+        console.log(chalk.green('✅ Reset mensile completato'))
+        resetOccurred = true
+    }
+    if (needsYearlyReset()) {
+        resetPeriodic('yearly')
+        console.log(chalk.green('✅ Reset annuale completato'))
+        resetOccurred = true
+    }
+    
+    return resetOccurred
+}
+
+// ==================== AUTO-RESET CHECKER (ogni 5 minuti invece di 1 ora) ====================
 if (!global.periodicResetInterval) {
     global.periodicResetInterval = setInterval(() => {
-        if (needsDailyReset()) {
-            resetPeriodic('daily')
-            console.log(chalk.green('✅ Reset giornaliero completato'))
-        }
-        if (needsWeeklyReset()) {
-            resetPeriodic('weekly')
-            console.log(chalk.green('✅ Reset settimanale completato'))
-        }
-        if (needsMonthlyReset()) {
-            resetPeriodic('monthly')
-            console.log(chalk.green('✅ Reset mensile completato'))
-        }
-        if (needsYearlyReset()) {
-            resetPeriodic('yearly')
-            console.log(chalk.green('✅ Reset annuale completato'))
-        }
-    }, 60 * 60 * 1000)
+        checkAndResetIfNeeded()
+    }, 5 * 60 * 1000) // 5 minuti invece di 1 ora
     
-    console.log(chalk.yellow('⏰ Scheduler reset periodici attivo'))
+    console.log(chalk.yellow('⏰ Scheduler reset periodici attivo (check ogni 5 min)'))
 }
+
+// Check immediato all'avvio
+checkAndResetIfNeeded()
 
 // ==================== AGGIORNA STATS PERIODICHE ====================
 export function updatePeriodicStats(chatId, userId) {
@@ -171,6 +196,9 @@ export function updatePeriodicStats(chatId, userId) {
 
 // ==================== COMANDO .top ====================
 export default async function handler(m, { conn, args, isOwner }) {
+    // ==================== CHECK RESET PRIMA DI MOSTRARE STATS ====================
+    checkAndResetIfNeeded()
+    
     flushMessageBuffer()
     
     const tipo = args[0]?.toLowerCase()
@@ -308,57 +336,46 @@ ${groupsList.map(g => `『 ${g.medal} 』\`${g.name}\`\n     💬 ${g.messages.t
             return
         }
         
-       // ==================== FETCH NOMI UTENTI ====================
-const usersList = []
-for (let i = 0; i < userRanking.length; i++) {
-    const [jid, data] = userRanking[i]
-    
-    // Priority: 1. Nome dal DB, 2. Cache, 3. getName, 4. JID
-    let userName = 'Utente'
-    
-    // 1. Prova dal DB
-    if (global.db?.data?.users?.[jid]?.name && global.db.data.users[jid].name !== '?') {
-        userName = global.db.data.users[jid].name
-    }
-    // 2. Prova dalla cache
-    else if (global.nameCache?.has(jid)) {
-        userName = global.nameCache.get(jid)
-    }
-    // 3. Prova getName
-    else if (conn.getName) {
-        try {
-            const fetchedName = await conn.getName(jid)
-            if (fetchedName) {
-                userName = fetchedName
-                if (global.nameCache) global.nameCache.set(jid, userName)
+        const usersList = []
+        for (let i = 0; i < userRanking.length; i++) {
+            const [jid, data] = userRanking[i]
+            
+            let userName = 'Utente'
+            
+            if (global.db?.data?.users?.[jid]?.name && global.db.data.users[jid].name !== '?') {
+                userName = global.db.data.users[jid].name
+            } else if (global.nameCache?.has(jid)) {
+                userName = global.nameCache.get(jid)
+            } else if (conn.getName) {
+                try {
+                    const fetchedName = await conn.getName(jid)
+                    if (fetchedName) {
+                        userName = fetchedName
+                        if (global.nameCache) global.nameCache.set(jid, userName)
+                    }
+                } catch (e) {}
             }
-        } catch (e) {}
-    }
-    
-    // 4. Fallback: usa prima parte del numero (senza @lid)
-    if (userName === 'Utente' || userName === '?') {
-        const phoneNumber = jid.split('@')[0]
-        // Se è un numero valido (solo cifre)
-        if (/^\d+$/.test(phoneNumber)) {
-            userName = phoneNumber
-        } else {
-            userName = 'Utente Sconosciuto'
-        }
-    }
-
+            
+            if (userName === 'Utente' || userName === '?') {
+                const phoneNumber = jid.split('@')[0]
+                if (/^\d+$/.test(phoneNumber)) {
+                    userName = phoneNumber
+                } else {
+                    userName = 'Utente Sconosciuto'
+                }
+            }
             
             let medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`
             
             usersList.push({ medal, jid, name: userName, messages: data.messages })
         }
         
-      let testo = ` ⋆｡˚『 ${periodIcon} ╭ \`TOP UTENTI ${periodName}\` ╯ 』˚｡⋆
+        let testo = ` ⋆｡˚『 ${periodIcon} ╭ \`TOP UTENTI ${periodName}\` ╯ 』˚｡⋆
 
 ${usersList.map(u => 
 `『 ${u.medal} 』${u.name}
      💬 ${u.messages.toLocaleString()} messaggi`
 ).join('\n\n')}`
-
 
         if (nextReset) {
             const timeRemaining = formatTimeRemaining(nextReset - Date.now())
